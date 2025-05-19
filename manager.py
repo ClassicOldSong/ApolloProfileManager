@@ -478,23 +478,41 @@ class ProfileManagerGUI(BaseTk):
 
 		uid, name = self.apps[sel[0]]
 		self.lbl_name.config(text=f"Name: {name}")
-		self.lbl_uuid.config(text=f"UUID: {{{uid}}}")
+		self.lbl_uuid.config(text=f"UUID: {uid}")
 		ini = self.root_dir / uid / "profile.ini"
 		if ini.exists():
 			cfg = load_config(ini, {"meta": {}})
 			lr = cfg["meta"].get("last_run_time", "—")
 			ls = cfg["meta"].get("last_save_time", "—")
+			lrc = cfg["meta"].get("last_run_client")
+			lsc = cfg["meta"].get("last_save_client")
+			if lrc:
+				client_path = self.root_dir / uid / lrc / "client.ini"
+				if client_path.exists():
+					cm = load_config(client_path, {"meta": {}})
+					lrc = cm["meta"].get("client_name", lrc)
+			if lsc:
+				client_path = self.root_dir / uid / lsc / "client.ini"
+				if client_path.exists():
+					cm = load_config(client_path, {"meta": {}})
+					lsc = cm["meta"].get("client_name", lsc)
 			for btn in (self.btn_manage, self.btn_open, self.btn_delete):
 				btn["state"] = "normal"
 		else:
 			lr, ls = "—", "—"
+			lrc, lsc = "—", "—"
 			for btn in (self.btn_manage, self.btn_open, self.btn_delete):
 				btn["state"] = "disabled"
 
+		if not lrc:
+			lrc = "—"
+		if not lsc:
+			lsc = "—"
+
 		self.btn_edit["state"] = "normal"
 
-		self.lbl_last_run.config(text=f"Last run: {lr}")
-		self.lbl_last_save.config(text=f"Last save: {ls}")
+		self.lbl_last_run.config(text=f"Last run: {lr} ({lrc})")
+		self.lbl_last_save.config(text=f"Last save: {ls} ({lsc})")
 
 	def ensure_profile_ini(self, app_dir: Path, app_name: str):
 		ini = app_dir / "profile.ini"
