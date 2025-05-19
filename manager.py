@@ -244,10 +244,10 @@ def do_action(app: Path, client: Path, paths: list[str], action: str):
 		print(f"App profile not found: {app_profile}, not doing anything.")
 		sys.exit(0)
 
-	bkup = app / f"{BACKUP_PREFIX}{client.name}"
+	client_name = os.getenv(ENV["CLIENT_NAME"])
+	bkup = app / f"{BACKUP_PREFIX}{client_name}"
+	client.mkdir(parents=True, exist_ok=True)
 	if action == "restore":
-		client.mkdir(parents=True, exist_ok=True)
-		
 		# Step 1: Backup current 'real' files to 'bkup' directory,
 		#         but only if 'bkup' directory doesn't already exist.
 		if not bkup.exists():
@@ -272,11 +272,10 @@ def do_action(app: Path, client: Path, paths: list[str], action: str):
 		mg["meta"].update({"last_run_time": now, "last_run_client": client.name})
 		save_config(mg, app / "profile.ini")
 		cm = load_config(client / "client.ini", {"meta": {}})
+		cm["meta"]["client_name"] = client_name
 		cm["meta"]["last_run_time"] = now
 		save_config(cm, client / "client.ini")
 	elif action == "save":
-
-		client.mkdir(parents=True, exist_ok=True)
 		for p in paths:
 			real, rel = Path(p).expanduser(), make_rel(Path(p))
 			old, saved = bkup / rel, client / rel
@@ -293,6 +292,7 @@ def do_action(app: Path, client: Path, paths: list[str], action: str):
 		mg["meta"].update({"last_save_time": now, "last_save_client": client.name})
 		save_config(mg, app_profile)
 		cm = load_config(client / "client.ini", {"meta": {}})
+		cm["meta"]["client_name"] = client_name
 		cm["meta"]["last_save_time"] = now
 		save_config(cm, client / "client.ini")
 	print(f"{action.title()} finished.")
