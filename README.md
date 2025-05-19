@@ -9,7 +9,7 @@ Requires [Apollo v0.3.5-alpha.2 or above](https://github.com/ClassicOldSong/Apol
 
 ## Download
 
-You can find the pre-built binary in [Releases](./releases)
+You can find the pre-built binary in [Releases](https://github.com/ClassicOldSong/ApolloProfileManager/releases)
 
 ## Usage
 
