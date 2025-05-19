@@ -1,11 +1,14 @@
 # Apollo Profile Manager
 
-Apollo Profile Manager is a tool designed to manage and automatically swap game configuration files, save files, and other user data between different clients of [Apollo](https://github.com/ClassicOldSong/Apollo). It provides a graphical interface for managing profiles, tracking file paths, and handling client-specific saves, making it easy to maintain separate configurations for different users or devices.
+Apollo Profile Manager is a tool designed to manage and automatically swap game configuration files, save files, mod sets and other user data between different clients of [Apollo](https://github.com/ClassicOldSong/Apollo). It provides a graphical interface for managing profiles, tracking file paths, and handling client-specific saves, making it easy to maintain separate configurations for different users or devices.
 
 Requires [Apollo v0.3.5-alpha.2 or above](https://github.com/ClassicOldSong/Apollo/releases), does not work with Sunshines.
 
 > [!Note]
 > Containing AI generated code, manually reviewed, modified and tested.
+
+> [!Warning]
+> Use carefully with your game saves. This app takes no responsiblity for any of your data loss.
 
 ## Download
 
