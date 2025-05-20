@@ -477,7 +477,7 @@ class ProfileManagerGUI(BaseTk):
 					ini = d / "profile.ini"
 					cfg = load_config(ini, {"meta": {}})
 					name = cfg["meta"].get("app_name", d.name) # Use dir name as fallback
-					extras.append((d.name, name))
+					extras.append((d.name, f"{name} (deleted)"))
 			self.apps.extend(extras) # Add extras not present in apps.json
 
 		self.games_lb.delete(0, "end")
@@ -511,9 +511,9 @@ class ProfileManagerGUI(BaseTk):
 			for btn in (self.btn_manage, self.btn_open, self.btn_delete, self.btn_edit):
 				btn["state"] = "disabled"
 			self.lbl_name.config(text="Name: —")
-			self.lbl_uuid.config(text="UUID: {—}")
-			self.lbl_last_run.config(text="Last run: —")
-			self.lbl_last_save.config(text="Last save: —")
+			self.lbl_uuid.config(text="UUID: —")
+			self.lbl_last_run.config(text="Last run: — (—)")
+			self.lbl_last_save.config(text="Last save: — (—)")
 			return
 
 		uid, name = self.apps[sel[0]]
