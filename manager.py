@@ -126,8 +126,12 @@ def inject_prep_commands(apollo_cfg_path: Path):
 	custom_cfg = ConfigParser(interpolation=None)
 	custom_cfg.read_string("[root]\n" + text)
 	root = custom_cfg["root"]
-	gp_raw = root.get("global_prep_cmd", "[]")
-	gp_list = json.loads(gp_raw)
+	gp_raw = root.get("global_prep_cmd")
+	if not gp_raw:
+		gp_list = []
+		root["global_prep_cmd"] = "[]"
+	else:
+		gp_list = json.loads(gp_raw)
 	script = Path(sys.argv[0]).resolve()
 
 	if not getattr(sys, 'frozen', False):
