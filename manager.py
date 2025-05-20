@@ -15,6 +15,7 @@ import argparse
 import traceback
 import subprocess
 import base64
+import hashlib
 
 # Optional drag-and-drop support and BaseTk selection
 try:
@@ -132,14 +133,14 @@ def inject_prep_commands(apollo_cfg_path: Path):
 		root["global_prep_cmd"] = "[]"
 	else:
 		gp_list = json.loads(gp_raw)
-	script = Path(sys.argv[0]).resolve()
+	script = f'"{Path(sys.argv[0]).resolve()}"'
 
 	if not getattr(sys, 'frozen', False):
-		script = f"{Path(sys.executable).resolve()} {script}"
+		script = f'"{Path(sys.executable).resolve()}" {script}'
 
 	new_entry = {
-		"do": f'"{script}" restore',
-		"undo": f'"{script}" save',
+		"do": f'{script} restore',
+		"undo": f'{script} save',
 	}
 	if sys.platform.startswith("win"):
 		new_entry["elevated"] = True
@@ -151,10 +152,11 @@ def inject_prep_commands(apollo_cfg_path: Path):
 				f.write(f"global_prep_cmd = {json.dumps(gp_list)}\n")
 			else:
 				f.write(f"{k} = {v}\n")
+
 def try_inject_prep_commands(apollo_cfg_path: Path):
 	if messagebox.askyesno(
 		"Inject Prep Commands",
-		"Inject do/undo prep commands into the Apollo config now? Please make sure you have already removed the existing prep commands for the profile manager.",
+		"Are you sure you want to inject do/undo prep commands into the Apollo config now? Please make sure you have already removed the existing prep commands for the profile manager.",
 	):
 		try:
 			inject_prep_commands(apollo_cfg_path)
@@ -249,16 +251,22 @@ def make_rel(path: Path) -> Path:
 	return p
 
 
-def get_app_paths(app: Path) -> list[str]:
+def get_app_paths(app: Path) -> list[tuple[str, str]]:
 	cfg = load_config(app / "profile.ini", {"paths": {}})
-	return [cfg["paths"][k] for k in sorted(cfg["paths"], key=int)]
+	paths_data = []
+	# Each path entry is now expected to be stored like:
+	# hash_value = /actual/path
+	for hash_val, path_str in cfg["paths"].items():
+		paths_data.append((path_str, hash_val))
+	return paths_data
 
 
-def set_app_paths(app: Path, paths: list[str]):
+def set_app_paths(app: Path, paths: list[str]): # paths is a list of path strings
 	cfg = load_config(app / "profile.ini", {"paths": {}})
 	cfg["paths"].clear()
-	for i, p in enumerate(paths):
-		cfg["paths"][str(i)] = p
+	for p_str in paths:
+		hash_val = hashlib.sha1(p_str.encode('utf-8')).hexdigest()
+		cfg["paths"][hash_val] = p_str
 	save_config(cfg, app / "profile.ini")
 
 
@@ -282,63 +290,145 @@ def remove_item(path: Path):
 
 
 # ─── CORE WORKFLOW ─────────────────────────────────────────────────────────────
-def do_action(app: Path, client: Path, paths: list[str], action: str):
+def do_action(app: Path, client: Path, paths_with_hashes: list[tuple[str, str]], action: str):
 	app_profile = app / "profile.ini"
 	if not app_profile.exists():
 		print(f"App profile not found: {app_profile}, not doing anything.")
 		sys.exit(0)
 
-	client_name = os.getenv(ENV["CLIENT_NAME"])
-	bkup = app / f"{BACKUP_PREFIX}{client_name}"
-	client.mkdir(parents=True, exist_ok=True)
-	if action == "restore":
-		# Step 1: Backup current 'real' files to 'bkup' directory,
-		#         but only if 'bkup' directory doesn't already exist.
-		if not bkup.exists():
-			# If bkup dir doesn't exist, create it by backing up current real files
-			for p in paths:
-				real_path, rel_path = Path(p).expanduser(), make_rel(Path(p))
-				backup_dest = bkup / rel_path
-				if real_path.exists():
-					copy_item(real_path, backup_dest)
-		# else: bkup already exists, so we don't touch it / re-backup.
+	client_uuid = os.getenv(ENV["CLIENT_UUID"])
+	client_name = os.getenv(ENV["CLIENT_NAME"]) # Retained for potential use in messages, meta, etc.
+	
+	backup_storage_base = app / f"{BACKUP_PREFIX}{client_uuid}"
+	client_profile_storage_base = client # client is rd / a_id / c_id
 
-		# Step 2: Restore 'saved' (client profile) files to 'real'
-		for p in paths:
-			real_path, rel_path = Path(p).expanduser(), make_rel(Path(p))
-			saved_source = client / rel_path
-			if saved_source.exists():
+	client_profile_storage_base.mkdir(parents=True, exist_ok=True)
+
+	if action == "restore":
+		# Step 1: Backup current 'real' items.
+		# This backup is created if it doesn't exist from a previous operation.
+		if not backup_storage_base.exists():
+			backup_storage_base.mkdir(parents=True, exist_ok=True)
+			for p_str, path_hash_str in paths_with_hashes:
+				real_path = Path(p_str).expanduser()
+				if not real_path.exists():
+					print(f"[warn] Path not found during backup: {real_path}")
+					continue
+
+				if real_path.is_dir():
+					# Backup directory contents into a container dir named by hash
+					item_backup_container = backup_storage_base / path_hash_str
+					# Ensure old container is removed if it exists (e.g. from an aborted previous op)
+					remove_item(item_backup_container)
+					copy_item(real_path, item_backup_container)
+				else: # real_path is a file
+					# Backup file as hash.original_ext
+					original_suffix = Path(p_str).suffix # Suffix from original path string
+					item_backup_file = backup_storage_base / (path_hash_str + original_suffix)
+					remove_item(item_backup_file) # Ensure old file is removed
+					copy_item(real_path, item_backup_file)
+		# else: backup_storage_base already exists, so we don't touch it / re-backup.
+
+		# Step 2: Restore 'saved' (client profile) items to 'real'
+		for p_str, path_hash_str in paths_with_hashes:
+			real_path = Path(p_str).expanduser()
+			original_suffix = Path(p_str).suffix
+
+			# Define potential storage paths in client profile
+			potential_dir_in_profile = client_profile_storage_base / path_hash_str
+			potential_file_in_profile = client_profile_storage_base / (path_hash_str + original_suffix)
+
+			restored_something = False
+			if potential_dir_in_profile.is_dir():
 				remove_item(real_path) # Remove current real item
-				copy_item(saved_source, real_path) # Copy from client profile to real
-		
+				# Ensure real_path (as a dir) exists before copying contents into it
+				real_path.mkdir(parents=True, exist_ok=True)
+				copy_item(potential_dir_in_profile, real_path) # Copies contents
+				restored_something = True
+			elif potential_file_in_profile.is_file():
+				remove_item(real_path) # Remove current real item
+				real_path.parent.mkdir(parents=True, exist_ok=True)
+				copy_item(potential_file_in_profile, real_path)
+				restored_something = True
+			
+			# if not restored_something and real_path.exists():
+			#    print(f"[info] No saved profile item found for {p_str}, existing real_path left untouched.")
+			# elif not restored_something:
+			#    print(f"[info] No saved profile item found for {p_str}, real_path does not exist.")
+
+
 		now = _dt.datetime.now().isoformat(timespec="seconds")
 		mg = load_config(app / "profile.ini", {"meta": {}})
-		mg["meta"].update({"last_run_time": now, "last_run_client": client.name})
+		mg["meta"].update({"last_run_time": now, "last_run_client": client.name}) # client.name is client_uuid
 		save_config(mg, app / "profile.ini")
-		cm = load_config(client / "client.ini", {"meta": {}})
-		cm["meta"]["client_name"] = client_name
+		cm = load_config(client_profile_storage_base / "client.ini", {"meta": {}}) # Storing client.ini in client profile root
+		cm["meta"]["client_name"] = client_name # User-friendly name
 		cm["meta"]["last_run_time"] = now
-		save_config(cm, client / "client.ini")
+		save_config(cm, client_profile_storage_base / "client.ini")
+
 	elif action == "save":
-		for p in paths:
-			real, rel = Path(p).expanduser(), make_rel(Path(p))
-			old, saved = bkup / rel, client / rel
-			if real.exists():
-				copy_item(real, saved)
+		for p_str, path_hash_str in paths_with_hashes:
+			real_path = Path(p_str).expanduser()
+			original_suffix = Path(p_str).suffix
+
+			# Define potential storage paths in client profile
+			item_profile_dir_container = client_profile_storage_base / path_hash_str
+			item_profile_file = client_profile_storage_base / (path_hash_str + original_suffix)
+
+			if real_path.exists():
+				if real_path.is_dir():
+					# Clean up potential old file if type changed (file -> dir)
+					if item_profile_file.is_file(): remove_item(item_profile_file)
+					# Remove old dir contents before saving new
+					if item_profile_dir_container.is_dir(): remove_item(item_profile_dir_container)
+					copy_item(real_path, item_profile_dir_container) # Saves contents into this hash-named dir
+				else: # real_path is a file
+					# Clean up potential old dir if type changed (dir -> file)
+					if item_profile_dir_container.is_dir(): remove_item(item_profile_dir_container)
+					# copy_item will overwrite if item_profile_file exists
+					copy_item(real_path, item_profile_file) # Saves as hash.ext
 			else:
-				print(f"[warn] missing during save: {real}")
-			if old.exists():
-				remove_item(real)
-				copy_item(old, real)
-		remove_item(bkup)
+				print(f"[warn] Real path missing during save: {real_path}. Corresponding profile item will not be updated.")
+				# If real_path is missing, we don't update the profile.
+				# To delete from profile if real_path is missing:
+				# if item_profile_file.exists(): remove_item(item_profile_file)
+				# if item_profile_dir_container.exists(): remove_item(item_profile_dir_container)
+
+
+			# Restore original item from backup (backup_storage_base) to real_path
+			# This backup was created by a "restore" action.
+			potential_dir_in_backup = backup_storage_base / path_hash_str
+			potential_file_in_backup = backup_storage_base / (path_hash_str + original_suffix)
+
+			restored_from_backup = False
+			if potential_dir_in_backup.is_dir():
+				remove_item(real_path) # Remove current real item (which was just saved to profile)
+				real_path.mkdir(parents=True, exist_ok=True)
+				copy_item(potential_dir_in_backup, real_path) # Copies contents
+				restored_from_backup = True
+			elif potential_file_in_backup.is_file():
+				remove_item(real_path) # Remove current real item
+				real_path.parent.mkdir(parents=True, exist_ok=True)
+				copy_item(potential_file_in_backup, real_path)
+				restored_from_backup = True
+			
+			# If real_path existed and was saved, but nothing was in backup to restore,
+			# real_path effectively remains as it was (after being saved to profile).
+			# If real_path did not exist, and nothing in backup, it remains non-existent.
+
+		# After processing all paths, remove the entire backup_storage_base for this client
+		if backup_storage_base.exists():
+			remove_item(backup_storage_base)
+
 		now = _dt.datetime.now().isoformat(timespec="seconds")
 		mg = load_config(app_profile, {"meta": {}})
-		mg["meta"].update({"last_save_time": now, "last_save_client": client.name})
+		mg["meta"].update({"last_save_time": now, "last_save_client": client.name}) # client.name is client_uuid
 		save_config(mg, app_profile)
-		cm = load_config(client / "client.ini", {"meta": {}})
-		cm["meta"]["client_name"] = client_name
+		cm = load_config(client_profile_storage_base / "client.ini", {"meta": {}}) # Storing client.ini in client profile root
+		cm["meta"]["client_name"] = client_name # User-friendly name
 		cm["meta"]["last_save_time"] = now
-		save_config(cm, client / "client.ini")
+		save_config(cm, client_profile_storage_base / "client.ini")
+		
 	print(f"{action.title()} finished.")
 
 
@@ -615,8 +705,7 @@ class ProfileManagerGUI(BaseTk):
 		dlg = PathEditorGUI(self, app_dir, name)
 
 	def inject_prep_commands(self):
-		if messagebox.askyesno("Inject Prep Commands", "Are you sure you want to inject prep commands? Please make sure you have already removed the existing prep commands for the profile manager."):
-			try_inject_prep_commands(self.apollo_path)
+		try_inject_prep_commands(self.apollo_path)
 
 		# Refresh game list and selection
 		self.refresh_games()
@@ -780,6 +869,37 @@ class PathEditorGUI(tk.Toplevel):
 		self.build_ui()
 		self.wait_window(self)
 
+	def _check_path_conflicts(self, p_str_to_check: str, current_tracked_paths_str: list[str], context_prefix: str) -> bool:
+		p_to_check = Path(p_str_to_check)
+		if not p_to_check.exists():
+			messagebox.showwarning("Invalid Path", f"{context_prefix} \n'{p_str_to_check}'\ndoes not exist.", parent=self)
+			return False
+
+		p_to_check_resolved = p_to_check.resolve()
+
+		# Check 1: Is p_to_check_resolved already a child of an existing tracked directory?
+		for existing_p_str in current_tracked_paths_str:
+			existing_path_resolved = Path(existing_p_str).resolve()
+			if existing_path_resolved.is_dir():
+				try:
+					if p_to_check_resolved.relative_to(existing_path_resolved):
+						messagebox.showwarning("Path Conflict", f"{context_prefix} \n'{p_str_to_check}'\nis already covered by the tracked directory \n'{existing_p_str}'.", parent=self)
+						return False
+				except ValueError: # Not a subpath
+					pass
+
+		# Check 2: If p_to_check_resolved is a directory, does it contain any existing tracked path?
+		if p_to_check_resolved.is_dir():
+			for existing_p_str in current_tracked_paths_str:
+				existing_path_resolved = Path(existing_p_str).resolve()
+				try:
+					if existing_path_resolved.relative_to(p_to_check_resolved):
+						messagebox.showwarning("Path Conflict", f"{context_prefix} directory \n'{p_str_to_check}'\ncontains an already tracked path \n'{existing_p_str}'.\nPlease remove the inner path first or add a more specific directory.", parent=self)
+						return False
+				except ValueError: # Not a subpath
+					pass
+		return True # No conflicts found
+
 	def build_ui(self):
 		lf = ttk.LabelFrame(self, text="Tracked paths")
 		lf.pack(fill="both", expand=True, padx=5, pady=5)
@@ -808,19 +928,46 @@ class PathEditorGUI(tk.Toplevel):
 		self.refresh()
 
 	def handle_drop(self, event):
-		files = self.tk.splitlist(event.data)
-		ps = get_app_paths(self.app_path)
-		for f in files:
-			p = Path(f)
-			if p.exists() and str(p) not in ps:
-				ps.append(str(p))
-		set_app_paths(self.app_path, ps)
-		self.refresh()
+		dropped_files_str = self.tk.splitlist(event.data)
+		ps_with_hashes = get_app_paths(self.app_path)
+		current_tracked_paths_str = [p_str for p_str, _ in ps_with_hashes]
+		
+		paths_to_actually_add = []
+		had_at_least_one_issue = False # Tracks if any DND item had any issue (conflict, non-existence, duplicate)
 
+		for p_str_dropped in dropped_files_str:
+			# Check 0: Is it a duplicate of an already tracked path string?
+			if p_str_dropped in current_tracked_paths_str:
+				# Optionally inform about duplicates, or just silently skip
+				# messagebox.showinfo("Already Tracked", f"The dropped path \n'{p_str_dropped}'\nis already tracked.", parent=self)
+				had_at_least_one_issue = True
+				continue
+			
+			# Perform conflict checks using the hoisted method
+			if not self._check_path_conflicts(p_str_dropped, current_tracked_paths_str, "Dropped path"):
+				had_at_least_one_issue = True
+				continue
+			
+			# If all checks pass, add to our list for this DND operation, avoiding duplicates from the same DND batch
+			if p_str_dropped not in paths_to_actually_add:
+				paths_to_actually_add.append(p_str_dropped)
+
+		if paths_to_actually_add:
+			all_current_plus_new_valid_dnd = current_tracked_paths_str + paths_to_actually_add
+			set_app_paths(self.app_path, all_current_plus_new_valid_dnd)
+			self.refresh()
+			
+			if had_at_least_one_issue:
+				messagebox.showinfo("Drag & Drop Result", "Some dropped items were added. Others were skipped due to conflicts, non-existence, or being duplicates.", parent=self)
+		elif had_at_least_one_issue: # Implies paths_to_actually_add is empty
+			messagebox.showwarning("Drag & Drop Failed", "No items were added from the drop operation due to conflicts, non-existence, or being duplicates.", parent=self)
+			
 	def refresh(self):
 		self.lb.delete(0, "end")
-		for p in get_app_paths(self.app_path):
-			self.lb.insert("end", p)
+		# get_app_paths now returns list of (path_str, hash_str)
+		# We display only the path_str in the listbox
+		for p_str, _ in get_app_paths(self.app_path):
+			self.lb.insert("end", p_str)
 
 	def add_path(self, is_dir: bool):
 		p = (
@@ -842,21 +989,36 @@ class PathEditorGUI(tk.Toplevel):
 		if not is_dir and not p_obj.is_file():
 			messagebox.showerror("Invalid file", f"{p} is not a file", parent=self)
 			return
-		ps = get_app_paths(self.app_path)
-		if p not in ps:
-			ps.append(p)
-			set_app_paths(self.app_path, ps)
-			self.refresh()
-		else:
-			messagebox.showwarning("Duplicate Path", f"The path {p} is already tracked.", parent=self)
+
+		p_to_add_path_str = p # Keep original string for adding if valid
+		ps_with_hashes = get_app_paths(self.app_path)
+		current_tracked_paths_str = [p_str for p_str, _ in ps_with_hashes]
+
+		# Check 0: Is it a duplicate of an already tracked path string?
+		if p_to_add_path_str in current_tracked_paths_str:
+			messagebox.showwarning("Duplicate Path", f"The path \n'{p_to_add_path_str}'\nis already tracked.", parent=self)
+			return
+
+		# Perform conflict checks using the hoisted method
+		if not self._check_path_conflicts(p_to_add_path_str, current_tracked_paths_str, "Path"):
+			return # Conflict message already shown by _check_path_conflicts
+
+		# If all checks pass, add the path (original string p)
+		updated_paths = current_tracked_paths_str + [p_to_add_path_str]
+		set_app_paths(self.app_path, updated_paths)
+		self.refresh()
 
 	def remove_path(self):
 		sel = self.lb.curselection()
 		if not sel:
 			return
-		ps = get_app_paths(self.app_path)
-		del ps[sel[0]]
-		set_app_paths(self.app_path, ps)
+		# get_app_paths now returns list of (path_str, hash_str)
+		# We need to reconstruct the list of path strings for set_app_paths
+		ps_with_hashes = get_app_paths(self.app_path)
+		current_paths = [p_str for p_str, _ in ps_with_hashes]
+		
+		del current_paths[sel[0]]
+		set_app_paths(self.app_path, current_paths)
 		self.refresh()
 
 
