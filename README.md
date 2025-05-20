@@ -20,6 +20,8 @@ You can find the pre-built binary in [Releases](https://github.com/ClassicOldSon
 2.  When prompted, select your Apollo configuration file (typically `sunshine.conf`).
 3.  After the main application window appears, you can manually add files that you want the manager to track.
 
+If you're getting "File name too long" error on Windows, follow [this guide](https://docs.python.org/3/using/windows.html#removing-the-max-path-limitation) to enable long file path support:
+
 ## Prerequisites
 
 - Python 3.x

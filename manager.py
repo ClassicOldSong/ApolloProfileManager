@@ -12,6 +12,9 @@ import shutil
 import re
 import tkinter as tk
 import argparse
+import traceback
+import subprocess
+import base64
 
 # Optional drag-and-drop support and BaseTk selection
 try:
@@ -75,6 +78,43 @@ CLIENT_META_INI = "client.ini"
 def load_meta(ini_path: Path) -> ConfigParser:
 	"""Load metadata section from ini file."""
 	return load_config(ini_path, {"meta": {}})
+
+
+# Helper function to spawn the error dialog in a detached process
+def _spawn_error_dialog_and_exit_zero(error_message: str):
+	"""Spawns a detached process (the script itself with special args) to show an error dialog, then exits current process with 0."""
+	encoded_error_message = base64.b64encode(error_message.encode('utf-8')).decode('utf-8')
+	
+	# sys.executable will be the path to the script or the PyInstaller executable
+	cmd_args = [sys.executable]
+	if not getattr(sys, 'frozen', False):
+		cmd_args.append(str(Path(sys.argv[0]).resolve()))
+	cmd_args.append("--show-error-dialog")
+	cmd_args.append(encoded_error_message)
+
+	print(cmd_args)
+
+	creation_flags = 0
+	startupinfo = None
+	if sys.platform == "win32":
+		creation_flags = 0x00000008  # DETACHED_PROCESS
+		startupinfo = subprocess.STARTUPINFO()
+		startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+		startupinfo.wShowWindow = subprocess.SW_HIDE  # Hides the console window if one would appear
+
+	try:
+		subprocess.Popen(cmd_args,
+						 creationflags=creation_flags,
+						 startupinfo=startupinfo,
+						 close_fds=True) # close_fds is default True on POSIX, good practice
+	except Exception as popen_err:
+		# If Popen itself fails, print to current process's stderr as a last resort.
+		sys.stderr.write(f"FATAL: Failed to spawn error dialog process: {popen_err}\n")
+		sys.stderr.write(f"Original error was:\n{error_message}\n")
+		# Exiting with 1 here as the error handling mechanism itself failed.
+		sys.exit(1)
+
+	sys.exit(0) # Original process exits with 0 after successfully launching dialog
 
 
 # ─── INJECT PREP COMMANDS ONCE ─────────────────────────────────────────────────
@@ -818,55 +858,103 @@ class PathEditorGUI(tk.Toplevel):
 
 # ─── ENTRY POINT ───────────────────────────────────────────────────────────────
 def main():
-	parser = argparse.ArgumentParser(description="Apollo Profile Manager")
-	parser.add_argument("--inject-config", help=argparse.SUPPRESS)  # Hide from help text
-	parser.add_argument("command", nargs="?", choices=["restore", "save"], help="Command to execute")
-
-	args = parser.parse_args()
-
-	# Handle Apollo config injection if specified
-	if args.inject_config:
-		apollo_path = Path(args.inject_config)
-		if not apollo_path.exists():
-			sys.exit(f"Apollo config file not found: {apollo_path}")
-
-		try:
-			inject_prep_commands(apollo_path)
-			root = BaseTk()
-			root.withdraw()
-			root.attributes("-topmost", True)
-			messagebox.showinfo("Apollo config", "Prep commands injected successfully. Please restart Apollo to take effect.")
-			root.destroy()
-			sys.exit(0)
-		except Exception as e:
-			root = BaseTk()
-			root.withdraw()
-			root.attributes("-topmost", True)
-			messagebox.showerror("Failed to inject prep commands", f"Failed to inject prep commands: {e}")
-			root.destroy()
-			sys.exit(1)
-
-	cmd = args.command
-	if cmd not in ("restore", "save"):
-		apollo_cfg = get_apollo_config_path()
-		ProfileManagerGUI(
-			apollo_cfg,
-			get_base_dir() / "profiles",
-			preselect=os.getenv(ENV["APP_UUID"]),
-		)
-		return
-
-	rd = get_base_dir() / "profiles"
-	a_id, c_id = os.getenv(ENV["APP_UUID"]), os.getenv(ENV["CLIENT_UUID"])
-	if not (a_id and c_id):
-		sys.exit("APOLLO_APP_UUID & APOLLO_CLIENT_UUID required.")
 	try:
-		uuid.UUID(a_id)
-		uuid.UUID(c_id)
-	except:
-		sys.exit("Invalid UUID format.")
-	app, client = rd / a_id, rd / a_id / c_id
-	do_action(app, client, get_app_paths(app), action=cmd)
+		parser = argparse.ArgumentParser(description="Apollo Profile Manager")
+		# Hidden argument for the error dialog mechanism
+		parser.add_argument("--show-error-dialog", type=str, help=argparse.SUPPRESS)
+		parser.add_argument("--show-error-dialog-test", type=str, help=argparse.SUPPRESS)
+		# Existing arguments
+		parser.add_argument("--inject-config", help=argparse.SUPPRESS)
+		parser.add_argument("command", nargs="?", choices=["restore", "save"], help="Command to execute")
+
+		args = parser.parse_args()
+
+		if args.show_error_dialog_test:
+			error_message = f"This is a test error message:\n\n{args.show_error_dialog_test}"
+			_spawn_error_dialog_and_exit_zero(error_message)
+
+		# Handle error dialog display if this instance is invoked for it
+		if args.show_error_dialog:
+			try:
+				error_message_decoded = base64.b64decode(args.show_error_dialog.encode('utf-8')).decode('utf-8')
+				root = BaseTk() # Use existing BaseTk for consistency
+				root.withdraw()
+				root.attributes("-topmost", True)
+				messagebox.showerror("Apollo Profile Manager - Error", error_message_decoded, parent=None)
+				root.destroy()
+			except Exception as display_err:
+				# If the error display mechanism itself fails, write to stderr.
+				# This might go to a log file for a PyInstaller app or be lost, but it's a last resort.
+				sys.stderr.write(f"Error within --show-error-dialog handler: {display_err}\nEncoded message was: {args.show_error_dialog}\n")
+				sys.exit(1) # Error dialog mechanism failed
+			sys.exit(0) # Error dialog shown, exit this instance cleanly
+
+		# Proceed with normal application logic if not in --show-error-dialog mode
+		# Handle Apollo config injection if specified
+		if args.inject_config:
+			apollo_path = Path(args.inject_config)
+			if not apollo_path.exists():
+				# This sys.exit will be caught by SystemExit handler below
+				sys.exit(f"Apollo config file not found: {apollo_path}")
+
+			try:
+				inject_prep_commands(apollo_path)
+				# Temporary root for messagebox, as main GUI might not be running
+				# This part is tricky if main() is supposed to be headless for this path.
+				# The original code creates a root here.
+				root = BaseTk()
+				root.withdraw()
+				root.attributes("-topmost", True)
+				messagebox.showinfo("Apollo config", "Prep commands injected successfully. Please restart Apollo to take effect.")
+				root.destroy()
+				sys.exit(0) # Clean exit
+			except Exception as e: # Catch specific errors from inject_prep_commands
+				# This will be caught by the general Exception handler below
+				# To make it more specific for this phase, we could re-raise or handle directly.
+				# For now, let it be caught by the general handler.
+				# However, the original code had its own messagebox here.
+				# Let's adapt: show its specific message then let our handler take over for exiting.
+				# This message will be shown by the main process, then the general handler kicks in.
+				root = BaseTk()
+				root.withdraw()
+				root.attributes("-topmost", True)
+				messagebox.showerror("Failed to inject prep commands", f"Failed to inject prep commands: {e}")
+				root.destroy()
+				# Now raise e so it's caught by the outer handler which calls _spawn_error_dialog_and_exit_zero
+				# Or, more directly, call sys.exit with an error message.
+				sys.exit(f"Failed to inject prep commands: {e}")
+
+
+		cmd = args.command
+		if cmd not in ("restore", "save"):
+			apollo_cfg = get_apollo_config_path() # Can raise SystemExit
+			ProfileManagerGUI(
+				apollo_cfg,
+				get_base_dir() / "profiles",
+				preselect=os.getenv(ENV["APP_UUID"]),
+			)
+			return # Normal exit for GUI
+
+		rd = get_base_dir() / "profiles"
+		a_id, c_id = os.getenv(ENV["APP_UUID"]), os.getenv(ENV["CLIENT_UUID"])
+		if not (a_id and c_id):
+			sys.exit("APOLLO_APP_UUID & APOLLO_CLIENT_UUID required.") # Caught by SystemExit
+		try:
+			uuid.UUID(a_id)
+			uuid.UUID(c_id)
+		except ValueError: # Specific exception type
+			sys.exit("Invalid UUID format.") # Caught by SystemExit
+		
+		app, client = rd / a_id, rd / a_id / c_id
+		do_action(app, client, get_app_paths(app), action=cmd)
+
+	except Exception as e:
+		traceback_str = traceback.format_exc()
+		print(traceback_str)
+
+		error_message = f"An unexpected error occurred:\n\n{type(e).__name__}: {e}\n\n{traceback_str}"
+
+		_spawn_error_dialog_and_exit_zero(error_message)
 
 
 if __name__ == "__main__":
